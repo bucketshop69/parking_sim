@@ -1,0 +1,2 @@
+[2025-12-02--15-07-14 ERROR surfpool::cli::simnet] Failed to start subgraph and explorer server: Address already in use (os error 98)
+[2025-12-02--15-07-14 ERROR surfpool::cli::simnet] Simnet exited with error: Failed to start RPC server: Address already in use (os error 98)
