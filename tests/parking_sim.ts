@@ -2,101 +2,32 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { ParkingSim } from "../target/types/parking_sim";
 import { assert } from "chai";
-import {
-  createMint,
-  getOrCreateAssociatedTokenAccount,
-  mintTo,
-  getAccount,
-  TOKEN_PROGRAM_ID,
-} from "@solana/spl-token";
 
-describe("parking_sim", () => {
+describe("parking_sim - Level 0", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
   const program = anchor.workspace.ParkingSim as Program<ParkingSim>;
   const wallet = provider.wallet as anchor.Wallet;
 
-  // Random ID to ensure a fresh test every time
+  // Random ID for fresh tests
   const spotId = `Spot_${Math.floor(Math.random() * 10000)}`;
   const licensePlate = "SOL-RICH";
 
-  // Hourly rate: 0.5 tokens per hour (500_000 with 6 decimals)
-  const hourlyRate = new anchor.BN(500_000);
-
-  // PDAs
+  // Calculate PDA address
   const [spotPda] = anchor.web3.PublicKey.findProgramAddressSync(
     [Buffer.from("spot"), Buffer.from(spotId)],
     program.programId
   );
 
-  const [parkMintPda] = anchor.web3.PublicKey.findProgramAddressSync(
-    [Buffer.from("park_mint")],
-    program.programId
-  );
+  // ============ TESTS ============
+  // These tests will FAIL until you implement the program!
 
-  // Token variables
-  let paymentMint: anchor.web3.PublicKey;
-  let userPaymentAta: anchor.web3.PublicKey;
-  let spotPaymentAta: anchor.web3.PublicKey;
-  let userParkAta: anchor.web3.PublicKey;
-
-  // ============ SETUP ============
-
-  it("0. Setup: Create a fake payment token and mint to user", async () => {
-    paymentMint = await createMint(
-      provider.connection,
-      wallet.payer,
-      wallet.publicKey,
-      null,
-      6
-    );
-    console.log(`✅ Created payment mint: ${paymentMint.toBase58()}`);
-
-    const userPaymentAccount = await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      paymentMint,
-      wallet.publicKey
-    );
-    userPaymentAta = userPaymentAccount.address;
-
-    await mintTo(
-      provider.connection,
-      wallet.payer,
-      paymentMint,
-      userPaymentAta,
-      wallet.publicKey,
-      100_000_000
-    );
-
-    const balance = await getAccount(provider.connection, userPaymentAta);
-    console.log(`✅ User has ${Number(balance.amount) / 1_000_000} payment tokens`);
-  });
-
-  it("1. Initializes the PARK token mint", async () => {
-    const mintInfo = await provider.connection.getAccountInfo(parkMintPda);
-    if (mintInfo) {
-      console.log(`ℹ️ PARK mint already exists at: ${parkMintPda.toBase58()}`);
-      return;
-    }
-
+  it("1. Initializes the Spot", async () => {
+    // TODO: Once you implement initialize_spot, this test should pass
+    
     await program.methods
-      .initializeParkMint()
-      .accounts({
-        parkMint: parkMintPda,
-        signer: wallet.publicKey,
-        systemProgram: anchor.web3.SystemProgram.programId,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc();
-
-    console.log(`✅ PARK mint created at: ${parkMintPda.toBase58()}`);
-  });
-
-  it("2. Initializes the Spot with hourly rate", async () => {
-    await program.methods
-      .initializeSpot(spotId, hourlyRate)
+      .initializeSpot(spotId)
       .accounts({
         spot: spotPda,
         signer: wallet.publicKey,
@@ -105,116 +36,132 @@ describe("parking_sim", () => {
       .rpc();
 
     const spotAccount = await program.account.parkingSpot.fetch(spotPda);
-    assert.equal(spotAccount.isOccupied, false);
-    assert.equal(spotAccount.hourlyRate.toNumber(), hourlyRate.toNumber());
-
-    console.log(`✅ Spot ${spotId} created with rate: ${hourlyRate.toNumber() / 1_000_000} tokens/hour`);
+    
+    assert.equal(spotAccount.isOccupied, false, "Spot should not be occupied");
+    assert.equal(
+      spotAccount.lotOwner.toString(),
+      wallet.publicKey.toString(),
+      "Lot owner should be signer"
+    );
+    
+    console.log(`✅ Spot ${spotId} created`);
   });
 
-  it("3. Parks Car (no payment yet - just records time)", async () => {
+  it("2. Parks a Car (pays SOL)", async () => {
+    // Get SOL balances before
+    const userBalanceBefore = await provider.connection.getBalance(wallet.publicKey);
+    const spotBalanceBefore = await provider.connection.getBalance(spotPda);
+    
     await program.methods
       .carPark(spotId, licensePlate)
       .accounts({
         spot: spotPda,
         signer: wallet.publicKey,
-        systemProgram: anchor.web3.SystemProgram.programId,  // Add this
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
-    // ...
+
+    // Check spot state
+    const spotAccount = await program.account.parkingSpot.fetch(spotPda);
+    assert.equal(spotAccount.isOccupied, true, "Spot should be occupied");
+    assert.equal(spotAccount.licensePlate, licensePlate, "License plate should match");
+    
+    // Check SOL transferred (0.1 SOL = 100_000_000 lamports)
+    const spotBalanceAfter = await provider.connection.getBalance(spotPda);
+    const spotBalanceDiff = spotBalanceAfter - spotBalanceBefore;
+    assert.equal(spotBalanceDiff, 100_000_000, "Spot should receive 0.1 SOL");
+    
+    console.log(`✅ Car parked, paid 0.1 SOL`);
   });
 
-  it("4. Leave Parking: Pays based on time + receives PARK reward", async () => {
-    // Calculate ATAs
-    spotPaymentAta = anchor.utils.token.associatedAddress({
-      mint: paymentMint,
-      owner: spotPda,
-    });
-
-    userParkAta = anchor.utils.token.associatedAddress({
-      mint: parkMintPda,
-      owner: wallet.publicKey,
-    });
-
-    // Get balances before
-    const paymentBefore = await getAccount(provider.connection, userPaymentAta);
-    console.log(`💰 User payment tokens before: ${Number(paymentBefore.amount) / 1_000_000}`);
-
-    let parkBefore = BigInt(0);
+  it("3. Cannot park in occupied spot", async () => {
     try {
-      const parkAccountBefore = await getAccount(provider.connection, userParkAta);
-      parkBefore = parkAccountBefore.amount;
-      console.log(`💰 User PARK tokens before: ${Number(parkBefore) / 1_000_000_000}`);
-    } catch {
-      console.log(`💰 User has no PARK tokens yet`);
+      await program.methods
+        .carPark(spotId, "HACKER-1")
+        .accounts({
+          spot: spotPda,
+          signer: wallet.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      
+      assert.fail("Should have thrown SpotTaken error");
+    } catch (error) {
+      assert.include(error.toString(), "SpotTaken");
+      console.log("✅ Correctly rejected parking in occupied spot");
     }
+  });
 
-    // Leave parking (this triggers payment)
+  it("4. Owner withdraws profit", async () => {
+    const ownerBalanceBefore = await provider.connection.getBalance(wallet.publicKey);
+    const spotBalanceBefore = await provider.connection.getBalance(spotPda);
+    
+    // Withdraw 50_000_000 lamports (0.05 SOL)
+    await program.methods
+      .withdrawProfit(spotId, new anchor.BN(50_000_000))
+      .accounts({
+        spot: spotPda,
+        signer: wallet.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    const spotBalanceAfter = await provider.connection.getBalance(spotPda);
+    const spotBalanceDiff = spotBalanceBefore - spotBalanceAfter;
+    
+    // Note: Actual received might be less due to rent-exempt minimum
+    console.log(`✅ Withdrew ${spotBalanceDiff / anchor.web3.LAMPORTS_PER_SOL} SOL`);
+  });
+
+  it("5. Leave parking spot", async () => {
     await program.methods
       .leaveParking(spotId)
       .accounts({
         spot: spotPda,
         signer: wallet.publicKey,
-        paymentMint: paymentMint,
-        userPaymentAta: userPaymentAta,
-        spotPaymentAta: spotPaymentAta,
-        parkMint: parkMintPda,
-        userParkAta: userParkAta,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: anchor.utils.token.ASSOCIATED_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
-    // Verify payment (minimum 1 hour = 0.5 tokens = 500_000)
-    const paymentAfter = await getAccount(provider.connection, userPaymentAta);
-    const paymentDiff = Number(paymentBefore.amount) - Number(paymentAfter.amount);
-    assert.equal(paymentDiff, 500_000, "Should have paid 0.5 tokens (1 hour minimum)");
-    console.log(`✅ Paid ${paymentDiff / 1_000_000} tokens for parking`);
-
-    // Verify spot received payment
-    const spotPayment = await getAccount(provider.connection, spotPaymentAta);
-    console.log(`✅ Spot received ${Number(spotPayment.amount) / 1_000_000} tokens`);
-
-    // Verify PARK reward (1 PARK per hour)
-    const userPark = await getAccount(provider.connection, userParkAta);
-    const parkDiff = Number(userPark.amount) - Number(parkBefore);
-    assert.equal(parkDiff, 1_000_000_000, "Should have received 1 PARK (1 hour)");
-    console.log(`✅ Received ${parkDiff / 1_000_000_000} PARK tokens as reward`);
-
-    // Verify spot is cleared
     const spotAccount = await program.account.parkingSpot.fetch(spotPda);
-    assert.equal(spotAccount.isOccupied, false);
-    assert.equal(spotAccount.parkedAt.toNumber(), 0);
-
-    console.log("✅ Left parking successfully!");
+    assert.equal(spotAccount.isOccupied, false, "Spot should be empty");
+    
+    console.log("✅ Left parking spot");
   });
 
-  it("5. Owner withdraws profit", async () => {
-    const spotPaymentBefore = await getAccount(provider.connection, spotPaymentAta);
-    console.log(`💰 Spot has: ${Number(spotPaymentBefore.amount) / 1_000_000} tokens`);
-
-    const ownerPaymentAta = anchor.utils.token.associatedAddress({
-      mint: paymentMint,
-      owner: wallet.publicKey,
-    });
-
+  it("6. Non-owner cannot withdraw", async () => {
+    // First, park again to have funds
     await program.methods
-      .withdrawProfit(spotId, new anchor.BN(Number(spotPaymentBefore.amount)))
+      .carPark(spotId, "TEST-123")
       .accounts({
         spot: spotPda,
         signer: wallet.publicKey,
-        paymentMint: paymentMint,
-        spotPaymentAta: spotPaymentAta,
-        ownerPaymentAta: ownerPaymentAta,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: anchor.utils.token.ASSOCIATED_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
-    const spotPaymentAfter = await getAccount(provider.connection, spotPaymentAta);
-    assert.equal(Number(spotPaymentAfter.amount), 0, "Spot should be empty");
+    // Create a hacker wallet
+    const hacker = anchor.web3.Keypair.generate();
+    await provider.connection.requestAirdrop(
+      hacker.publicKey, 
+      anchor.web3.LAMPORTS_PER_SOL
+    );
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
-    console.log(`✅ Owner withdrew all tokens`);
+    try {
+      await program.methods
+        .withdrawProfit(spotId, new anchor.BN(50_000_000))
+        .accounts({
+          spot: spotPda,
+          signer: hacker.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([hacker])
+        .rpc();
+
+      assert.fail("Should have thrown NotYourProfit error");
+    } catch (error) {
+      assert.include(error.toString(), "NotYourProfit");
+      console.log("✅ Correctly prevented unauthorized withdrawal");
+    }
   });
 });
